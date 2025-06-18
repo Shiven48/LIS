@@ -1,0 +1,14 @@
+# Frames
+ASTM_END_BLOCK = b'\x17'
+HL7_START_BLOCK = b'\x0B'
+HL7_END_BLOCK = b'\x1C\r'
+
+# For Serial Setup
+DEFAULT_SERIAL_PORT = "COM3"
+DEFAULT_BAUD_RATE = "9600"
+DEFAULT_DATA_BITS = "8"
+DEFAULT_PARITY = "NONE"
+DEFAULT_STOP_BITS = "1"
+
+# For log file
+LOG_FILE_PATH = "logs/app.log"
