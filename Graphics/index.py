@@ -1,11 +1,37 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, scrolledtext
 from datetime import datetime
 import threading
 import serial
 import socket
 import time
-from .. import config
+import requests
+import re
+
+ENQ = b'\x05'
+ACK = b'\x06'
+NAK = b'\x15'
+EOT = b'\x04'
+STX = b'\x02'
+ETX = b'\x03'
+
+control_map = {
+    0x05: 'ENQ',
+    0x06: 'ACK',
+    0x15: 'NAK',
+    0x04: 'EOT',
+    0x02: 'STX',
+    0x03: 'ETX'
+}
+
+CONTROL_CHAR_TO_BYTE = {
+    'ENQ': b'\x05',
+    'ACK': b'\x06',
+    'NAK': b'\x15',
+    'EOT': b'\x04',
+    'STX': b'\x02',
+    'ETX': b'\x03'
+}
 
 class MiddlewareGUI:
 
@@ -24,10 +50,16 @@ class MiddlewareGUI:
         self.serial_data_buffer = []
         self.network_data_buffer = []
         self.data_received = False
+
+        self.net_host = 'localhost'
+        self.net_port = 15200
+        self.sock = None
         
         # Create notebook for tabs
         self.notebook = ttk.Notebook(root)
-        
+        self.errors_frame = None
+        self.log_frame = None
+
         # Create tabs
         self.serial_tab = ttk.Frame(self.notebook)
         self.network_tab = ttk.Frame(self.notebook)
@@ -36,115 +68,148 @@ class MiddlewareGUI:
         # Add tabs to notebook
         self.notebook.add(self.serial_tab, text='Serial Mode')
         self.notebook.add(self.network_tab, text='Network Mode')
-        self.notebook.add(self.logs_tab, text='Logs')
+        # self.notebook.add(self.logs_tab, text='Logs')
         
         self.notebook.pack(expand=1, fill='both', padx=10, pady=10)
         
         # Setup all tabs
         self.setup_serial_tab()
         self.setup_network_tab()
-        self.setup_logs_tab()
-        
+        # self.setup_logs_tab()
+    
         # Log initial startup
         self.log_event("Analyzer Middleware started")
 
     def setup_serial_tab(self):
-        # Main frame for serial tab
-        main_frame = ttk.Frame(self.serial_tab)
-        main_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        # Connection settings frame
-        settings_frame = ttk.LabelFrame(main_frame, text="Serial Connection Settings")
-        settings_frame.pack(fill='x', pady=(0, 10))
-        
-        # Port setting
-        ttk.Label(settings_frame, text="Port:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
-        self.serial_port = ttk.Entry(settings_frame, width=20)
-        self.serial_port.grid(row=0, column=1, padx=5, pady=5)
-        self.serial_port.insert(0, config.DEFAULT_SERIAL_PORT)  
-        
-        # Baud rate setting
-        ttk.Label(settings_frame, text="Baud Rate:").grid(row=1, column=0, sticky='w', padx=5, pady=5)
-        self.baud_rate = ttk.Combobox(settings_frame, width=17, values=[9600, 19200, 38400, 57600, 115200])
-        self.baud_rate.grid(row=1, column=1, padx=5, pady=5)
-        self.baud_rate.set(config.DEFAULT_BAUD_RATE)  
-        
-        # Data bits setting
-        ttk.Label(settings_frame, text="Data Bits:").grid(row=2, column=0, sticky='w', padx=5, pady=5)
-        self.data_bits = ttk.Combobox(settings_frame, width=17, values=[7, 8])
-        self.data_bits.grid(row=2, column=1, padx=5, pady=5)
-        self.data_bits.set(config.DEFAULT_DATA_BITS)
-        
-        # Parity setting
-        ttk.Label(settings_frame, text="Parity:").grid(row=0, column=2, sticky='w', padx=5, pady=5)
-        self.parity = ttk.Combobox(settings_frame, width=17, values=["None", "Even", "Odd"])
-        self.parity.grid(row=0, column=3, padx=5, pady=5)
-        self.parity.set(config.DEFAULT_PARITY)
-        
-        # Stop bits setting
-        ttk.Label(settings_frame, text="Stop Bits:").grid(row=1, column=2, sticky='w', padx=5, pady=5)
-        self.stop_bits = ttk.Combobox(settings_frame, width=17, values=[1, 2])
-        self.stop_bits.grid(row=1, column=3, padx=5, pady=5)
-        self.stop_bits.set(config.DEFAULT_STOP_BITS)
-        
-        # Connection buttons
-        button_frame = ttk.Frame(settings_frame)
-        button_frame.grid(row=3, column=0, columnspan=4, pady=10)
-        
-        self.serial_connect_btn = ttk.Button(button_frame, text="Connect", command=self.handle_serial_connection)
-        self.serial_connect_btn.pack(side='left', padx=5)
-        
-        self.serial_disconnect_btn = ttk.Button(button_frame, text="Disconnect", command=self.disconnect_serial, state='disabled')
-        self.serial_disconnect_btn.pack(side='left', padx=5)
-        
-        # Status label
-        self.serial_status = ttk.Label(button_frame, text="Disconnected", foreground='red')
-        self.serial_status.pack(side='left', padx=10)
-        
-        # API endpoint frame for serial
-        api_frame_serial = ttk.LabelFrame(main_frame, text="API Endpoint Configuration")
-        api_frame_serial.pack(fill='x', pady=(0, 10))
-        
-        ttk.Label(api_frame_serial, text="API Endpoint:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
-        self.serial_api_endpoint = ttk.Entry(api_frame_serial, width=40)
-        self.serial_api_endpoint.grid(row=0, column=1, padx=5, pady=5, sticky='ew')
-        self.serial_api_endpoint.insert(0, "http://localhost:8000/app/analyzer/parse")
-        
-        # API send button
-        self.serial_send_api_btn = ttk.Button(api_frame_serial, text="Send to API", 
-                                            command=self.send_serial_data_to_api, state='disabled')
-        self.serial_send_api_btn.grid(row=0, column=2, padx=5, pady=5)
-        
-        # Clear buffer button
-        self.serial_clear_buffer_btn = ttk.Button(api_frame_serial, text="Clear Buffer", 
-                                                command=self.clear_serial_buffer)
-        self.serial_clear_buffer_btn.grid(row=1, column=0, padx=5, pady=5)
-        
-        # Buffer status label
-        self.serial_buffer_status = ttk.Label(api_frame_serial, text="Buffer: 0 messages")
-        self.serial_buffer_status.grid(row=1, column=1, sticky='w', padx=5, pady=5)
-        
-        # Configure column weight
-        api_frame_serial.columnconfigure(1, weight=1)
-        
-        # Monitor frame
-        monitor_frame = ttk.LabelFrame(main_frame, text="Serial Data Monitor (ASTM/HL7)")
-        monitor_frame.pack(fill='both', expand=True)
-        
-        # Text widget with scrollbar
-        text_frame = ttk.Frame(monitor_frame)
-        text_frame.pack(fill='both', expand=True, padx=5, pady=5)
-        
-        self.serial_monitor = tk.Text(text_frame, height=15, wrap='word')
-        serial_scrollbar = ttk.Scrollbar(text_frame, orient='vertical', command=self.serial_monitor.yview)
-        self.serial_monitor.configure(yscrollcommand=serial_scrollbar.set)
-        
-        self.serial_monitor.pack(side='left', fill='both', expand=True)
-        serial_scrollbar.pack(side='right', fill='y')
-        
-        # Clear button
-        clear_serial_btn = ttk.Button(monitor_frame, text="Clear Monitor", command=lambda: self.serial_monitor.delete(1.0, tk.END))
-        clear_serial_btn.pack(pady=5)
+        # Main container
+        main_frame = tk.Frame(self.serial_tab, bg='#f0f0f0')
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # --- Top Control Frame ---
+        top_frame = tk.Frame(main_frame, bg='#e6e6e6', relief=tk.RAISED, bd=2)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+
+        connection_frame = tk.Frame(top_frame, bg='#e6e6e6')
+        connection_frame.pack(pady=10)
+
+        # Port label
+        tk.Label(connection_frame, text="Port:", bg='#e6e6e6', font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+        self.serial_port_var = tk.StringVar(value="COM2")
+        tk.Label(connection_frame, textvariable=self.serial_port_var, bg='#e6e6e6', font=('Arial', 10)).pack(side=tk.LEFT, padx=(5, 15))
+
+        # Baud Rate
+        tk.Label(connection_frame, text="Baud:", bg='#e6e6e6', font=('Arial', 10, 'bold')).pack(side=tk.LEFT)
+        self.baud_var = tk.StringVar(value="9600")
+        baud_menu = tk.OptionMenu(connection_frame, self.baud_var, "9600", "19200", "38400", "57600", "115200")
+        baud_menu.configure(bg='white', font=('Arial', 9))
+        baud_menu.pack(side=tk.LEFT, padx=(5, 15))
+
+        # Connect Button
+        self.serial_connect_btn = tk.Button(connection_frame, 
+                                            text="Connect", 
+                                            command=self.connect_serial_proxy,
+                                            bg='#4CAF50', 
+                                            fg='white', 
+                                            font=('Arial', 10, 'bold'), 
+                                            relief=tk.RAISED, 
+                                            bd=2, 
+                                            padx=15)
+        self.serial_connect_btn.pack(side=tk.LEFT, padx=5)
+
+        # Disconnect Button
+        self.serial_disconnect_btn = tk.Button(connection_frame, 
+                                               text="Disconnect", 
+                                               command=self.disconnect_serial_proxy,
+                                               bg='#f44336', 
+                                               fg='white', 
+                                               font=('Arial', 10, 'bold'), 
+                                               relief=tk.RAISED, 
+                                               bd=2, 
+                                               padx=15)
+        self.serial_disconnect_btn.pack(side=tk.LEFT, padx=5)
+
+        # Connection Status
+        self.status_label = tk.Label(top_frame, text="Disconnected", bg='#e6e6e6', fg='red', font=('Arial', 10, 'bold'))
+        self.status_label.pack(side=tk.RIGHT, padx=10, pady=5)
+
+        # --- Middle Log Frames ---
+        middle_frame = tk.Frame(main_frame)
+        middle_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+
+        # General Logs
+        self.logs_frame = tk.LabelFrame(middle_frame, text="General Logs", font=('Arial', 11, 'bold'), bg='#f0f0f0')
+        self.logs_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+
+        self.log_text = scrolledtext.ScrolledText(self.logs_frame, width=40, height=25,
+            font=('Consolas', 9), bg='white', fg='black', wrap=tk.WORD, relief=tk.SUNKEN, bd=2)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Error Logs
+        self.errors_frame = tk.LabelFrame(middle_frame, text="Error Logs", font=('Arial', 11, 'bold'), bg='#f0f0f0')
+        self.errors_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+
+        self.error_text = scrolledtext.ScrolledText(self.errors_frame, width=40, height=25,
+            font=('Consolas', 9), bg='#fff8f8', fg='#d32f2f', wrap=tk.WORD, relief=tk.SUNKEN, bd=2)
+        self.error_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # --- Bottom Input + Controls ---
+        bottom_frame = tk.Frame(main_frame, bg='#e6e6e6', relief=tk.RAISED, bd=2)
+        bottom_frame.pack(fill=tk.X, pady=(0, 5))
+
+        # Message input
+        input_frame = tk.Frame(bottom_frame, bg='#e6e6e6')
+        input_frame.pack(pady=10)
+
+        tk.Label(input_frame, text="Message:", bg='#e6e6e6', font=('Arial', 10, 'bold')).pack(side=tk.LEFT, padx=(0, 5))
+        self.input_entry = tk.Entry(input_frame, width=60, font=('Arial', 10), relief=tk.SUNKEN, bd=2)
+        self.input_entry.pack(side=tk.LEFT, padx=5)
+
+        self.send_btn = tk.Button(input_frame, text="Send", command=self.send_text,
+            bg='#2196F3', fg='white', font=('Arial', 10, 'bold'), relief=tk.RAISED, bd=2, padx=15)
+        self.send_btn.pack(side=tk.LEFT, padx=5)
+
+        # ENQ Button
+        enq_frame = tk.Frame(bottom_frame, bg='#e6e6e6')
+        enq_frame.pack(pady=(0, 10))
+
+        self.enq_btn = tk.Button(enq_frame, text="Send ENQ", command=self.send_enq,
+            bg='#FF9800', fg='white', font=('Arial', 10, 'bold'), relief=tk.RAISED, bd=2, padx=20)
+        self.enq_btn.pack()
+
+        # Control buttons
+        control_frame = tk.Frame(bottom_frame, bg='#e6e6e6')
+        control_frame.pack(pady=(0, 10))
+
+        self.clear_logs_btn = tk.Button(control_frame, text="Clear Logs", command=self.clear_logs,
+            bg='#9E9E9E', fg='white', font=('Arial', 9), relief=tk.RAISED, bd=2, padx=10)
+        self.clear_logs_btn.pack(side=tk.LEFT, padx=5)
+
+        self.clear_errors_btn = tk.Button(control_frame, text="Clear Errors", command=self.clear_errors,
+            bg='#9E9E9E', fg='white', font=('Arial', 9), relief=tk.RAISED, bd=2, padx=10)
+        self.clear_errors_btn.pack(side=tk.LEFT, padx=5)
+
+        # TCP Target Entry
+        # tcp_frame = ttk.LabelFrame(main_frame, text="TCP Server Configuration", padding=10)
+        # tcp_frame.pack(fill='x', pady=(5, 10))
+
+        # ttk.Label(tcp_frame, text="Host:").grid(row=0, column=0, padx=5, pady=5, sticky='e')
+        # self.tcp_host_entry = ttk.Entry(tcp_frame, width=20)
+        # self.tcp_host_entry.grid(row=0, column=1, padx=5, pady=5)
+        # self.tcp_host_entry.insert(0, "127.0.0.1")
+
+        # ttk.Label(tcp_frame, text="Port:").grid(row=0, column=2, padx=5, pady=5, sticky='e')
+        # self.tcp_port_entry = ttk.Entry(tcp_frame, width=10)
+        # self.tcp_port_entry.grid(row=0, column=3, padx=5, pady=5)
+        # self.tcp_port_entry.insert(0, "15200")
+
+        # Keybindings + Tags
+        # self.input_entry.bind('<Return>', lambda event: self.send_text())
+        # self.log_text.tag_configure("timestamp", foreground="#1D1D1D", font=('Consolas', 8))
+        # self.log_text.tag_configure("sent", foreground="#0066CC", font=('Consolas', 9, 'bold'))
+        # self.log_text.tag_configure("received", foreground="#009900", font=('Consolas', 9, 'bold'))
+        # self.error_text.tag_configure("error", foreground="#d32f2f", font=('Consolas', 9, 'bold'))
+        # self.error_text.tag_configure("warning", foreground="#ff9800", font=('Consolas', 9, 'bold'))
+        # self.error_text.tag_configure("timestamp", foreground="#1D1D1D", font=('Consolas', 8))
 
     def setup_network_tab(self):
         # Main frame for network tab
@@ -232,44 +297,220 @@ class MiddlewareGUI:
         clear_network_btn = ttk.Button(monitor_frame, text="Clear Monitor", command=lambda: self.network_monitor.delete(1.0, tk.END))
         clear_network_btn.pack(pady=5)
 
-    def setup_logs_tab(self):
-        # Main frame for logs tab
-        main_frame = ttk.Frame(self.logs_tab)
-        main_frame.pack(fill='both', expand=True, padx=10, pady=10)
+    # def setup_logs_tab(self):
+    #     # Main frame for logs tab
+    #     main_frame = ttk.Frame(self.logs_tab)
+    #     main_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
-        # Logs frame
-        logs_frame = ttk.LabelFrame(main_frame, text="System Logs")
-        logs_frame.pack(fill='both', expand=True)
+    #     # Logs frame
+    #     logs_frame = ttk.LabelFrame(main_frame, text="System Logs")
+    #     logs_frame.pack(fill='both', expand=True)
         
-        # Text widget with scrollbar
-        text_frame = ttk.Frame(logs_frame)
-        text_frame.pack(fill='both', expand=True, padx=5, pady=5)
+    #     # Text widget with scrollbar
+    #     text_frame = ttk.Frame(logs_frame)
+    #     text_frame.pack(fill='both', expand=True, padx=5, pady=5)
         
-        self.logs = tk.Text(text_frame, height=20, wrap='word')
-        logs_scrollbar = ttk.Scrollbar(text_frame, orient='vertical', command=self.logs.yview)
-        self.logs.configure(yscrollcommand=logs_scrollbar.set)
+    #     self.logs = tk.Text(text_frame, height=20, wrap='word')
+    #     logs_scrollbar = ttk.Scrollbar(text_frame, orient='vertical', command=self.logs.yview)
+    #     self.logs.configure(yscrollcommand=logs_scrollbar.set)
         
-        self.logs.pack(side='left', fill='both', expand=True)
-        logs_scrollbar.pack(side='right', fill='y')
+    #     self.logs.pack(side='left', fill='both', expand=True)
+    #     logs_scrollbar.pack(side='right', fill='y')
         
-        # Control buttons
-        button_frame = ttk.Frame(logs_frame)
-        button_frame.pack(fill='x', pady=5)
+    #     # Control buttons
+    #     button_frame = ttk.Frame(logs_frame)
+    #     button_frame.pack(fill='x', pady=5)
         
-        ttk.Button(button_frame, text="Clear Logs", command=self.clear_logs).pack(side='left', padx=5)
-        ttk.Button(button_frame, text="Save Logs", command=self.save_logs).pack(side='left', padx=5)
+    #     ttk.Button(button_frame, text="Clear Logs", command=self.clear_logs).pack(side='left', padx=5)
+    #     ttk.Button(button_frame, text="Save Logs", command=self.save_logs).pack(side='left', padx=5)
 
-    def log_event(self, message):
-        """Add a timestamped message to the logs"""
+    def log_event(self, message, msg_type="info"):
+        """
+        Add a message to the general logs window
+        msg_type: 'info', 'sent', 'received', 'timestamp'
+        """
         timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-        log_message = f"{timestamp} {message}\n"
+        self.log_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.log_text.insert(tk.END, f"{message}\n", msg_type)
         
         # Add to logs tab
-        self.logs.insert(tk.END, log_message)
-        self.logs.see(tk.END)
+        # self.logs.insert(tk.END, log_message)
+        # self.logs.see(tk.END)
+        self.log_text.see(tk.END)
+
+    def log(self, message, msg_type="info"):
+        self.log_text.see(tk.END)
+
+    def connect_serial_proxy(self):
+        try:
+            serial_port = str(self.serial_port_var.get())
+            serial_baud = int(self.baud_var.get())
+            
+            self.ser = serial.Serial(serial_port, serial_baud, timeout=1)
+            self.log_event(f"[Analyzer] Connected to {serial_port} at {serial_baud} baud")
+            
+            # Check if socket connection succeeds
+            if self.connectSocket():
+                # If socket is connected start reading using other thread
+                self.reading = True
+                self.read_thread = threading.Thread(target=self.read_socket)
+                self.read_thread.daemon = True
+                self.read_thread.start()
+            else:
+                self.log_error("[Error] Failed to connect to socket", "error")
+            
+        except serial.SerialException as e:
+            self.log_error(f"[Error] {e}", "error")
+
+    def read_socket(self):
+        while self.reading and self.sock:
+            try:
+                self.sock.settimeout(1.0)
+                data = self.sock.recv(4096)
+            
+                if data:
+                    # decoded = data.decode(errors='ignore', encoding='latin-1').strip()
+                    for b in data:
+                        if b in control_map:
+                            self.log_event(f"[CONTROL] - {control_map[b]}", "recv")
+                        else:
+                            self.log_event(f"[RECEIVED BYTE] - {chr(b)}", "recv")
+                else:
+                    self.log_event("[INFO] Socket connection closed by remote", "info")
+                    break
+                
+            except socket.timeout:
+                continue
+            except socket.error as e:
+                self.log_error(f"[Socket Error] {e}", "error")
+                break
+            except Exception as e:
+                self.log_error(f"[Unexpected Error] {e}", "error")
+                break
+            
+            time.sleep(0.3)
+
+    def connectSocket(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setblocking(True)
+            sock.connect((self.net_host,self.net_port))
+            self.log_event(f"Successfully connected to {self.net_host}:{self.net_port}")
+            self.sock = sock
+            return True
+        except socket.gaierror as e:
+            self.log_error(f"Address-related error connecting to {self.net_host}:{self.net_port} - {e}")
+        except socket.timeout as e:
+            self.log_error(f"Connection to {self.net_host}:{self.net_port} timed out - {e}")
+        except ConnectionRefusedError as e:
+            self.log_error(f"Connection to {self.net_host}:{self.net_port} refused - {e}")
+        except socket.error as e:
+            self.log_error(f"Socket error while connecting to {self.net_host}:{self.net_port} - {e}")
+        except Exception as e:
+            self.log_error(f"Unexpected error during socket connection: {e}")
+
+    def log_error(self, error_message, error_type="error"):
+        """
+        Add an error message to the error logs window
+        error_type: 'error', 'warning'
+        """
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         
-        # Also print to console for debugging
-        print(log_message.strip())
+        self.error_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.error_text.insert(tk.END, f"{error_message}\n", error_type)
+        self.error_text.see(tk.END)
+        
+    def disconnect_serial_proxy(self):
+        self.reading = False
+        if self.ser and self.ser.is_open:
+            self.log_event("Closing serial port...")
+            self.ser.close()
+            self.log_event("[Analyzer] Serial port disconnected")
+
+    def send_text(self):
+        user_input = self.input_entry.get()
+        try:
+            parsed_msg = self.parse_input_with_control_chars(user_input)
+            self.sock.sendall(parsed_msg)
+            pretty = self.preetyLogger(parsed_msg)
+            self.log_event(pretty, "send")
+        except (ConnectionAbortedError, BrokenPipeError):
+            self.log_error("[Error] Socket connection aborted. Please reconnect.", "error")
+        except Exception as e:
+            self.log_error(f"[Unexpected Error] {e}", "error")
+
+    def parse_input_with_control_chars(self, input_str: str) -> bytes:
+        """
+        Converts human-friendly input like "[STX]data[ETX]" into proper ASTM bytes.
+        """
+        result = bytearray()
+    
+        # Replace known escape sequences manually
+        input_str = input_str.replace('\\r', '\r').replace('\\n', '\n')
+        
+        # Find all parts like [STX], data, [ETX]
+        tokens = re.split(r'(\[[A-Z]+\])', input_str)
+    
+        for token in tokens:
+            match = re.match(r'\[([A-Z]+)\]', token)
+            if match:
+                ctrl = match.group(1)
+                if ctrl in CONTROL_CHAR_TO_BYTE:
+                    result.extend(CONTROL_CHAR_TO_BYTE[ctrl])
+            else:
+                result.extend(token.encode('latin-1'))
+        
+        return bytes(result)
+    
+    def preetyLogger(self, bdata: bytes):
+        output_lines = []
+        buffer = []
+        in_astm_block = False
+
+        for b in bdata:
+            if b in control_map:
+                label = control_map[b]
+
+                if label == 'STX':
+                    # Start capturing ASTM block
+                    in_astm_block = True
+                    buffer.append(f"[{label}]")
+                elif label == 'ETX':
+                    buffer.append(f"[{label}]")
+                    in_astm_block = False
+                else:
+                    # Flush current ASTM block if exists
+                    if buffer:
+                        output_lines.append(''.join(buffer))
+                        buffer = []
+                    output_lines.append(f" - [{label}]")
+            elif b == 13:  # \r (CR)
+                buffer.append("[CR]")
+            elif b == 10:  # \n (LF)
+                buffer.append("[LF]")
+            else:
+                try:
+                    buffer.append(chr(b))
+                except:
+                    buffer.append(f"[0x{b:02X}]")  # fallback for unknown byte
+
+        if buffer:
+            output_lines.append(''.join(buffer))
+
+        return "\n".join(output_lines)
+    
+    def buffer_to_lines(self, buffer):
+        try:
+            return bytes(buffer).decode('latin-1', errors='ignore').replace('\r', '')
+        except Exception:
+            return repr(buffer)
+
+    def send_enq(self):
+        if self.ser and self.ser.is_open:
+            self.sock.sendall(ENQ)
+            b = 0x05
+            self.log_event(f"[Sent] {control_map[b]}", "send")
 
     def handle_serial_connection(self):
         """Handle serial connection"""
@@ -610,9 +851,14 @@ class MiddlewareGUI:
         self.log_event("Network data buffer cleared")
 
     def clear_logs(self):
-        """Clear the logs"""
-        self.logs.delete(1.0, tk.END)
-        self.log_event("Logs cleared")
+        """Clear all content from the general logs window"""
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.insert(tk.END, "--- General logs cleared ---\n", "info")
+
+    def clear_errors(self):
+        """Clear all content from the error logs window"""
+        self.error_text.delete(1.0, tk.END)
+        self.error_text.insert(tk.END, "--- Error logs cleared ---\n", "info")
 
     def save_logs(self):
         """Save logs to file"""
@@ -635,7 +881,6 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = MiddlewareGUI(root)
     
-    # Handle window closing
     root.protocol("WM_DELETE_WINDOW", app.on_closing)
     
     root.mainloop()
